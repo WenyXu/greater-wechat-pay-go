@@ -6,23 +6,31 @@ Copyright 2020 RS4
 
 package config
 
-import "time"
+import (
+	"crypto/rsa"
+	"time"
+
+	"github.com/WenyXu/greater-wechat-pay-go/global"
+)
 
 type Config struct {
-	Loc                *time.Location
-	AppId              string
-	PrivateKey         string
-	PrivateKeyType     string
-	AppCertSN          string
-	AliPayPublicCertSN string
-	AliPayRootCertSN   string
-	SignType           string
-	ReturnUrl          string
-	NotifyUrl          string
-	Charset            string
-	Format             string
-	Version            string
-	AppAuthToken       string
-	AuthToken          string
-	Production         bool
+	Loc          *time.Location
+	AppId        string
+	MchID        string
+	ApiV3Key     string
+	PrivateKey   *rsa.PrivateKey
+	PublicCertSn string
+	SignType     string
+	ReturnUrl    string
+	NotifyUrl    string
+	Charset      string
+	Format       string
+	Version      string
+	AppAuthToken string
+	AuthToken    string
+	Production   bool
+}
+
+func (c Config) URL() string {
+	return global.DefaultEndpoint
 }

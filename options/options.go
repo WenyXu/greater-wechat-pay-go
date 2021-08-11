@@ -9,16 +9,25 @@ package options
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
-	"github.com/WenyXu/better-alipay-go/cert"
-	"github.com/WenyXu/better-alipay-go/config"
-	"github.com/WenyXu/greater-wechat-pay-go/logger"
-	"github.com/WenyXu/greater-wechat-pay-go/m"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
+
+	"github.com/WenyXu/greater-wechat-pay-go/cert"
+
+	"github.com/WenyXu/greater-wechat-pay-go/global"
+
+	"github.com/WenyXu/greater-wechat-pay-go/config"
+	"github.com/WenyXu/greater-wechat-pay-go/sign"
+
+	"github.com/WenyXu/greater-wechat-pay-go/logger"
+	"github.com/WenyXu/greater-wechat-pay-go/m"
 )
 
 func InitTransport() http.RoundTripper {
@@ -68,20 +77,20 @@ type Option func(*Options)
 type ReqFunc func(context context.Context, req *http.Request) context.Context
 
 // ResponseFunc a hook After the request finished
-type ResponseFunc func(context context.Context, response *http.Response) context.Context
+type ResponseFunc func(context context.Context, response *http.Response) (context.Context, error)
 
-type ResponseHandler func(context context.Context, resp *http.Response, result interface{}) error
+type ResponseHandler func(context context.Context, resp *http.Response) (context.Context, error)
 
 // MakeReqFunc make request
-type MakeReqFunc func(context context.Context, method string, m m.M, config config.Config) (*http.Request, error)
+type MakeReqFunc func(context context.Context, url, method string, m m.M, config config.Config) (*http.Request, error)
 
 // DecFunc convert response body into a struct or map
-type DecFunc func(context.Context, interface{}, interface{}) error
+type DecFunc func(context.Context, interface{}, interface{}, config.Config) error
 
 // Options for wechat sdk
 type Options struct {
 	Config config.Config
-
+	//CertStorage cert.Manager
 	// hooks
 	Before          []ReqFunc
 	After           []ResponseFunc
@@ -101,7 +110,8 @@ type Options struct {
 // Copy create a current Options' Copy
 func (o Options) Copy() Options {
 	cp := Options{
-		Config:    o.Config,
+		Config: o.Config,
+		// ref
 		Before:    []ReqFunc{},
 		After:     []ResponseFunc{},
 		Dec:       o.Dec,
@@ -119,18 +129,40 @@ func (o Options) Copy() Options {
 	return o
 }
 
-func WithoutBizContentMakeReqFunc(ctx context.Context, method string, param m.M, c config.Config) (*http.Request, error) {
+func WithoutBizContentMakeReqFunc(ctx context.Context, url, method string, param m.M, c config.Config) (*http.Request, error) {
 	panic("implement")
 }
 
 // NewDefaultMakeReqFunc default make request func
-func NewDefaultMakeReqFunc(ctx context.Context, method string, param m.M, c config.Config) (*http.Request, error) {
-	panic("implement")
-
+func NewDefaultMakeReqFunc(ctx context.Context, url, method string, param m.M, c config.Config) (req *http.Request, err error) {
+	req, err = http.NewRequest(method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Accept", "*/*")
+	var bodyStr []byte
+	if param != nil {
+		bodyStr, err = json.Marshal(param)
+		if err != nil {
+			return nil, err
+		}
+		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyStr))
+	}
+	if err != nil {
+		return nil, err
+	}
+	randStr := strconv.FormatUint(rand.Uint64(), 16)
+	timestamp := time.Now().Unix()
+	sign, err := sign.SignRequest(fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n", req.Method, req.URL.RequestURI(), strconv.FormatInt(timestamp, 10), randStr, string(bodyStr)), c.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add(global.HeaderAuthorization, fmt.Sprintf(global.Authorization+` mchid="%s",nonce_str="%s",timestamp="%s",serial_no="%s",signature="%s"`, c.MchID, randStr, strconv.FormatInt(timestamp, 10), c.PublicCertSn, sign))
+	return req, nil
 }
 
 // NewDefaultDecFunc encode json into target struct
-func NewDefaultDecFunc(ctx context.Context, input interface{}, result interface{}) (err error) {
+func NewDefaultDecFunc(ctx context.Context, input interface{}, result interface{}, cfg config.Config) (err error) {
 	resp := input.(*http.Response)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP Request Error, StatusCode = %d", resp.StatusCode)
@@ -200,15 +232,15 @@ func DefaultBeforeFunc(ctx context.Context, req *http.Request) context.Context {
 }
 
 // DefaultAfterFunc log the response body
-func DefaultAfterFunc(ctx context.Context, resp *http.Response) context.Context {
+func DefaultAfterFunc(ctx context.Context, resp *http.Response) (context.Context, error) {
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Read Response body with error: %s", err.Error())
-		return ctx
+		return ctx, nil
 	}
 	resp.Body = ioutil.NopCloser(bytes.NewBuffer(body))
 	fmt.Println(string(body))
-	return ctx
+	return ctx, nil
 }
 
 // EmptyBeforeFunc do nothing
@@ -314,24 +346,58 @@ func NewDefaultLocation() Option {
 	}
 }
 
-// AppId set AppId
-func AppId(appId string) Option {
+// MchID set MchID
+func MchID(id string) Option {
 	return func(options *Options) {
-		options.Config.AppId = appId
+		options.Config.MchID = id
 	}
 }
 
 // PrivateKey set PrivateKey string
-func PrivateKey(privateKey string) Option {
+func APIV3Key(key string) Option {
+	return func(options *Options) {
+		options.Config.ApiV3Key = key
+	}
+}
+
+// PrivateKey set PrivateKey string
+func PrivateKey(privateKey *rsa.PrivateKey) Option {
 	return func(options *Options) {
 		options.Config.PrivateKey = privateKey
 	}
 }
 
-// PrivateKey set PrivateKeyType
-func PrivateKeyType(privateKeyType string) Option {
+func PrivateKeyFromPath(path string) Option {
 	return func(options *Options) {
-		options.Config.PrivateKeyType = privateKeyType
+		k, err := cert.LoadPrivateCertFormPath(global.PKCS8, path)()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		options.Config.PrivateKey = k
+	}
+}
+
+func PrivateKeyFromBytes(b []byte) Option {
+	return func(options *Options) {
+
+	}
+}
+
+func ClientCertSnFromPath(path string) Option {
+	return func(options *Options) {
+		c, err := cert.LoadCertSN(path)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		options.Config.PublicCertSn = c
+	}
+}
+
+func ClientCertSnFromBytes(b []byte) Option {
+	return func(options *Options) {
+
 	}
 }
 
@@ -370,92 +436,93 @@ func AuthToken(authToken string) Option {
 	}
 }
 
-// AppCertPath set AppCertSn form path
-func AppCertPath(path string) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadCertSN(path)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		options.Config.AppCertSN = sn
-	}
-}
+//// AppCertPath set AppCertSn form path
+//func AppCertPath(path string) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadCertSN(path)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		options.Config.AppCertSN = sn
+//	}
+//}
+//
 
-// AppCertBytes set AppCertSn form bytes
-func AppCertBytes(data []byte) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadCertSN(data)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		AppCertSn(sn)(options)
-	}
-}
+//// AppCertBytes set AppCertSn form bytes
+//func AppCertBytes(data []byte) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadCertSN(data)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		AppCertSn(sn)(options)
+//	}
+//}
 
-// AppCertSn set AppCertSn
-func AppCertSn(sn string) Option {
-	return func(options *Options) {
-		options.Config.AppCertSN = sn
-	}
-}
+//// AppCertSn set AppCertSn
+//func AppCertSn(sn string) Option {
+//	return func(options *Options) {
+//		options.Config.AppCertSN = sn
+//	}
+//}
 
-// RootCertPath set RootCertSn from path
-func RootCertPath(path string) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadRootCertSN(path)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		RootCertSn(sn)(options)
-	}
-}
+//// RootCertPath set RootCertSn from path
+//func RootCertPath(path string) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadRootCertSN(path)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		RootCertSn(sn)(options)
+//	}
+//}
 
-// RootCertBytes set RootCertSn from bytes
-func RootCertBytes(data []byte) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadRootCertSN(data)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		RootCertSn(sn)(options)
-	}
-}
+//// RootCertBytes set RootCertSn from bytes
+//func RootCertBytes(data []byte) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadRootCertSN(data)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		RootCertSn(sn)(options)
+//	}
+//}
+//
+//// RootCertSn set RootCertSn
+//func RootCertSn(sn string) Option {
+//	return func(options *Options) {
+//		options.Config.AliPayRootCertSN = sn
+//	}
+//}
 
-// RootCertSn set RootCertSn
-func RootCertSn(sn string) Option {
-	return func(options *Options) {
-		options.Config.AliPayRootCertSN = sn
-	}
-}
+//// PublicCertPath set PublicCertSn from path
+//func PublicCertPath(path string) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadCertSN(path)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		PublicCertSn(sn)(options)
+//	}
+//}
+//
+//// PublicCertBytes set PublicCertSn from bytes
+//func PublicCertBytes(data []byte) Option {
+//	return func(options *Options) {
+//		sn, err := cert.LoadCertSN(data)
+//		if err != nil {
+//			options.Logger.Error(err.Error())
+//		}
+//		PublicCertSn(sn)(options)
+//	}
+//}
 
-// PublicCertPath set PublicCertSn from path
-func PublicCertPath(path string) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadCertSN(path)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		PublicCertSn(sn)(options)
-	}
-}
-
-// PublicCertBytes set PublicCertSn from bytes
-func PublicCertBytes(data []byte) Option {
-	return func(options *Options) {
-		sn, err := cert.LoadCertSN(data)
-		if err != nil {
-			options.Logger.Error(err.Error())
-		}
-		PublicCertSn(sn)(options)
-	}
-}
-
-// PublicCertSn set PublicCertSn
-func PublicCertSn(sn string) Option {
-	return func(options *Options) {
-		options.Config.AliPayPublicCertSN = sn
-	}
-}
+//// PublicCertSn set PublicCertSn
+//func PublicCertSn(sn string) Option {
+//	return func(options *Options) {
+//		options.Config.AliPayPublicCertSN = sn
+//	}
+//}
 
 // Production set Production flag
 func Production(input bool) Option {

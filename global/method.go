@@ -6,7 +6,26 @@ Copyright 2020 RS4
 
 package global
 
-const (
+type MethodGetEndpoint string
+type MethodPostEndpoint string
+
+func (str MethodGetEndpoint) Url() string {
+	return string(str)
+}
+
+func (str MethodGetEndpoint) Method() string {
+	return "GET"
+}
+
+func (str MethodPostEndpoint) Url() string {
+	return string(str)
+}
+
+func (str MethodPostEndpoint) Method() string {
+	return "POST"
+}
+
+var (
 	MethodGet     = "GET"
 	MethodHead    = "HEAD"
 	MethodPost    = "POST"
